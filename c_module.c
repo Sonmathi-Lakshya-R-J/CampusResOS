@@ -1,22 +1,37 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <ctype.h>
 #include <pthread.h>
-#define MAX_TOKENS 30000
-#define MAX_TEXT 256
-#define MAX_BOOKINGS 2000
+#include <ctype.h>
+
+#define MAX_JSON 2000000
+#define MAX_TOKENS 50000
 #define MAX_ROOMS 500
-#define INPUT_SIZE (2 * 1024 * 1024)
+#define MAX_BOOKINGS 10000
+#define MAX_TEXT 256
+
+typedef enum {
+    TOKEN_OBJECT,
+    TOKEN_ARRAY,
+    TOKEN_STRING,
+    TOKEN_PRIMITIVE
+} TokenType;
+
 typedef struct {
-    int start, end, size, parent;
+    TokenType type;
+    int start;
+    int end;
+    int size;
+    int parent;
 } Token;
+
 typedef struct {
     char id[MAX_TEXT];
     char name[MAX_TEXT];
     int capacity;
+    int active;
 } Room;
+
 typedef struct {
     char id[MAX_TEXT];
     char faculty[MAX_TEXT];
@@ -24,687 +39,1038 @@ typedef struct {
     char day[MAX_TEXT];
     char start[MAX_TEXT];
     char end[MAX_TEXT];
-    char course[MAX_TEXT];
-    char type[MAX_TEXT];
     char status[MAX_TEXT];
     int students;
     int priority;
     int processing_time;
+    int waiting_time;
+    int turnaround_time;
 } Booking;
+
+typedef struct {
+    int index;
+    int priority;
+    int duration;
+    int original_order;
+} Job;
+
+static char json[MAX_JSON];
 static Token tokens[MAX_TOKENS];
-static int token_count;
-static char input_buffer[INPUT_SIZE];
+static int token_count = 0;
+
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static Room rooms[MAX_ROOMS];
-static int room_count;
 static Booking bookings[MAX_BOOKINGS];
-static int booking_count;
-static pthread_mutex_t allocation_lock = PTHREAD_MUTEX_INITIALIZER;
-static void skip_whitespace(int *p) {
-    while (input_buffer[*p] &&
-           isspace((unsigned char)input_buffer[*p])) {
-        (*p)++;
+
+static int room_count = 0;
+static int booking_count = 0;
+
+/* Function declarations */
+
+static int parse_json(void);
+static int parse_value(int *position, int parent);
+static int skip_whitespace(int *position);
+static int find_key(int object_token, const char *key);
+static int token_equals(int token, const char *value);
+static void token_string(int token, char *output, size_t size);
+static int token_integer(int token, int fallback);
+static int time_to_minutes(const char *value);
+static int intervals_overlap(const char *start1, const char *end1,
+                             const char *start2, const char *end2);
+static int find_room(const char *room_id);
+static int is_active_status(const char *status);
+
+static int is_room_available(const char *room_id,
+                             const char *day,
+                             const char *start,
+                             const char *end,
+                             int students,
+                             char *reason,
+                             size_t reason_size);
+
+static int load_rooms(int array_token);
+static int load_bookings(int array_token);
+static int load_pending(int array_token,
+                        Booking *pending,
+                        int max_pending);
+
+static void print_json_string(const char *value);
+static void operation_check_room(int root);
+static void operation_schedule(int root);
+static int booking_duration(const Booking *booking);
+
+static void print_booking_result(const Booking *booking,
+                                 const char *result_status,
+                                 const char *reason);
+
+static void print_alternatives(const Booking *booking);
+static int token_next(int token);
+
+
+/* Skip whitespace */
+
+static int skip_whitespace(int *position) {
+    while (json[*position] &&
+           isspace((unsigned char)json[*position])) {
+        (*position)++;
     }
+
+    return 1;
 }
-static int parse_value(int *p, int parent);
-static int parse_string(int *p, int parent) {
-    int index = ++(*p);
-    int id = token_count++;
-    if (id >= MAX_TOKENS)
+
+
+/* Parse one JSON value */
+
+static int parse_value(int *position, int parent) {
+    skip_whitespace(position);
+
+    if (token_count >= MAX_TOKENS) {
         return -1;
-    tokens[id].start = index;
-    tokens[id].parent = parent;
-    tokens[id].size = 0;
-    while (input_buffer[*p]) {
-        if (input_buffer[*p] == '\\' &&
-            input_buffer[*p + 1]) {
-            *p += 2;
-            continue;
-        }
-        if (input_buffer[*p] == '"') {
-            tokens[id].end = *p;
-            (*p)++;
-            return id;
-        }
-        (*p)++;
     }
-    tokens[id].end = *p;
-    return id;
-}
-static int parse_value(int *p, int parent) {
-    skip_whitespace(p);
-    if (!input_buffer[*p])
-        return -1;
-    int id = token_count++;
-    if (id >= MAX_TOKENS)
-        return -1;
-    tokens[id].parent = parent;
-    tokens[id].size = 0;
-    tokens[id].start = *p;
-    char c = input_buffer[*p];
-    if (c == '"') {
-        token_count--;
-        return parse_string(p, parent);
-    }
+
+    int index = token_count++;
+    Token *token = &tokens[index];
+
+    token->start = *position;
+    token->end = *position;
+    token->size = 0;
+    token->parent = parent;
+
+    char c = json[*position];
+
     if (c == '{' || c == '[') {
-        (*p)++;
-        skip_whitespace(p);
-        while (input_buffer[*p] &&
-               input_buffer[*p] != (c == '{' ? '}' : ']')) {
-            if (input_buffer[*p] == ',' ||
-                input_buffer[*p] == ':') {
-                (*p)++;
+        token->type = (c == '{') ? TOKEN_OBJECT : TOKEN_ARRAY;
+
+        char closing = (c == '{') ? '}' : ']';
+
+        (*position)++;
+
+        while (1) {
+            skip_whitespace(position);
+
+            if (json[*position] == closing) {
+                (*position)++;
+                token->end = *position;
+                return index;
+            }
+
+            if (json[*position] == '\0') {
+                return -1;
+            }
+
+            if (json[*position] == ',' ||
+                json[*position] == ':') {
+                (*position)++;
                 continue;
             }
-            int child = parse_value(p, id);
-            if (child < 0)
+
+            int child = parse_value(position, index);
+
+            if (child < 0) {
                 return -1;
-            tokens[id].size++;
-            skip_whitespace(p);
+            }
+
+            token->size++;
+        }
+    }
+
+    if (c == '"') {
+        token->type = TOKEN_STRING;
+
+        (*position)++;
+
+        while (json[*position]) {
+            if (json[*position] == '\\') {
+                (*position) += json[*position + 1] ? 2 : 1;
+                continue;
+            }
+
+            if (json[*position] == '"') {
+                (*position)++;
+                token->end = *position;
+                return index;
+            }
+
+            (*position)++;
         }
 
-        if (input_buffer[*p])
-            (*p)++;
-
-        tokens[id].end = *p;
-        return id;
+        return -1;
     }
-    while (input_buffer[*p] &&
-           input_buffer[*p] != ',' &&
-           input_buffer[*p] != ']' &&
-           input_buffer[*p] != '}' &&
-           !isspace((unsigned char)input_buffer[*p])) {
-        (*p)++;
-    }
-    tokens[id].end = *p;
-    return id;
-}
-static int next_token(int id) {
-    int end = tokens[id].end;
-    id++;
-    while (id < token_count && tokens[id].start < end)
-        id++;
 
-    return id;
+    token->type = TOKEN_PRIMITIVE;
+
+    while (json[*position] &&
+           json[*position] != ',' &&
+           json[*position] != ']' &&
+           json[*position] != '}' &&
+           !isspace((unsigned char)json[*position])) {
+        (*position)++;
+    }
+
+    token->end = *position;
+
+    if (token->end == token->start) {
+        return -1;
+    }
+
+    return index;
 }
-static int token_equals(int id, const char *value) {
-    if (id < 0 || id >= token_count)
-        return 0;
-    int length = tokens[id].end - tokens[id].start;
-    return length == (int)strlen(value) &&
-           strncmp(input_buffer + tokens[id].start,
-                   value, (size_t)length) == 0;
+
+
+/* Parse the complete JSON input */
+
+static int parse_json(void) {
+    int position = 0;
+
+    token_count = 0;
+
+    skip_whitespace(&position);
+
+    if (json[position] != '{') {
+        return -1;
+    }
+
+    int root = parse_value(&position, -1);
+
+    if (root < 0) {
+        return -1;
+    }
+
+    skip_whitespace(&position);
+
+    if (json[position] != '\0') {
+        return -1;
+    }
+
+    return root;
 }
-static void get_token_text(int id, char *output, size_t size) {
-    if (size == 0)
+
+
+/* Find the token following a JSON value */
+
+static int token_next(int token) {
+    if (token < 0 || token >= token_count) {
+        return token_count;
+    }
+
+    int end = tokens[token].end;
+    int next = token + 1;
+
+    while (next < token_count &&
+           tokens[next].start < end) {
+        next++;
+    }
+
+    return next;
+}
+
+
+/* Copy a JSON token into a string */
+
+static void token_string(int token, char *output, size_t size) {
+    if (size == 0) {
         return;
+    }
+
     output[0] = '\0';
-    if (id < 0 || id >= token_count)
+
+    if (token < 0 || token >= token_count) {
         return;
-    int length = tokens[id].end - tokens[id].start;
-    if (length < 0)
-        return;
-    if ((size_t)length >= size)
-        length = (int)size - 1;
-    memcpy(output, input_buffer + tokens[id].start,
-           (size_t)length);
+    }
+
+    Token *t = &tokens[token];
+
+    int start = t->start;
+    int end = t->end;
+
+    if (t->type == TOKEN_STRING) {
+        start++;
+        end--;
+    }
+
+    size_t length = (size_t)(end - start);
+
+    if (length >= size) {
+        length = size - 1;
+    }
+
+    memcpy(output, json + start, length);
+
     output[length] = '\0';
-    if (tokens[id].start > 0 &&
-        input_buffer[tokens[id].start - 1] == '"') {
-        char temporary[MAX_TEXT * 2];
-        size_t j = 0;
-        for (size_t i = 0;
-             output[i] && j + 1 < sizeof(temporary);
-             i++) {
-            if (output[i] == '\\' && output[i + 1]) {
-                i++;
-                if (output[i] == 'n' ||
-                    output[i] == 't') {
-                    temporary[j++] = ' ';
-                } else {
-                    temporary[j++] = output[i];
-                }
-            } else {
-                temporary[j++] = output[i];
+}
+
+
+/* Compare a JSON token with a string */
+
+static int token_equals(int token, const char *value) {
+    char buffer[MAX_TEXT];
+
+    token_string(token, buffer, sizeof(buffer));
+
+    return strcmp(buffer, value) == 0;
+}
+
+
+/* Find a key inside a JSON object */
+
+static int find_key(int object_token, const char *key) {
+    if (object_token < 0 ||
+        object_token >= token_count ||
+        tokens[object_token].type != TOKEN_OBJECT) {
+        return -1;
+    }
+
+    int end = token_next(object_token);
+    int child = object_token + 1;
+
+    while (child < end) {
+        int value = child + 1;
+
+        if (value >= token_count) {
+            return -1;
+        }
+
+        if (token_equals(child, key)) {
+            return value;
+        }
+
+        child = token_next(value);
+    }
+
+    return -1;
+}
+
+
+/* Convert a JSON token to an integer */
+
+static int token_integer(int token, int fallback) {
+    if (token < 0 || token >= token_count) {
+        return fallback;
+    }
+
+    if (token_equals(token, "null")) {
+        return fallback;
+    }
+
+    char buffer[MAX_TEXT];
+
+    token_string(token, buffer, sizeof(buffer));
+
+    char *end = NULL;
+    long value = strtol(buffer, &end, 10);
+
+    if (end == buffer || *end != '\0') {
+        return fallback;
+    }
+
+    return (int)value;
+}
+
+
+/* Convert HH:MM into minutes */
+
+static int time_to_minutes(const char *value) {
+    int hours = -1;
+    int minutes = -1;
+    char extra;
+
+    if (sscanf(value, "%d:%d%c",
+               &hours, &minutes, &extra) != 2) {
+        return -1;
+    }
+
+    if (hours < 0 || hours > 23 ||
+        minutes < 0 || minutes > 59) {
+        return -1;
+    }
+
+    return hours * 60 + minutes;
+}
+
+
+/* Check whether two time intervals overlap */
+
+static int intervals_overlap(const char *start1,
+                             const char *end1,
+                             const char *start2,
+                             const char *end2) {
+    int s1 = time_to_minutes(start1);
+    int e1 = time_to_minutes(end1);
+    int s2 = time_to_minutes(start2);
+    int e2 = time_to_minutes(end2);
+
+    if (s1 < 0 || e1 < 0 ||
+        s2 < 0 || e2 < 0) {
+        return 0;
+    }
+
+    return s1 < e2 && s2 < e1;
+}
+
+
+/* Find a classroom by its ID */
+
+static int find_room(const char *room_id) {
+    for (int i = 0; i < room_count; i++) {
+        if (strcmp(rooms[i].id, room_id) == 0) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+
+/* Determine which existing booking statuses block a room */
+
+static int is_active_status(const char *status) {
+    return strcmp(status, "ALLOCATED") == 0 ||
+           strcmp(status, "APPROVED") == 0 ||
+           strcmp(status, "CONFIRMED") == 0;
+}
+
+
+/* Load classrooms from JSON */
+
+static int load_rooms(int array_token) {
+    room_count = 0;
+
+    if (array_token < 0 ||
+        tokens[array_token].type != TOKEN_ARRAY) {
+        return 0;
+    }
+
+    int end = token_next(array_token);
+    int child = array_token + 1;
+
+    while (child < end && room_count < MAX_ROOMS) {
+        if (tokens[child].type != TOKEN_OBJECT) {
+            child = token_next(child);
+            continue;
+        }
+
+        Room *room = &rooms[room_count];
+
+        memset(room, 0, sizeof(*room));
+
+        token_string(find_key(child, "id"),
+                     room->id, sizeof(room->id));
+
+        token_string(find_key(child, "name"),
+                     room->name, sizeof(room->name));
+
+        room->capacity =
+            token_integer(find_key(child, "capacity"), 0);
+
+        room->active = 1;
+
+        int status_token = find_key(child, "status");
+
+        if (status_token >= 0) {
+            char status[MAX_TEXT];
+
+            token_string(status_token, status, sizeof(status));
+
+            if (strcmp(status, "MAINTENANCE") == 0 ||
+                strcmp(status, "INACTIVE") == 0) {
+                room->active = 0;
             }
         }
-        temporary[j] = '\0';
-        snprintf(output, size, "%s", temporary);
-    }
-}
-static int object_get(int object, const char *key) {
-    if (object < 0 || object >= token_count)
-        return -1;
-    int i = object + 1;
-    while (i < token_count &&
-           tokens[i].start < tokens[object].end) {
-        int key_token = i;
-        int value_token = key_token + 1;
-        if (value_token >= token_count)
-            return -1;
-        if (token_equals(key_token, key))
-            return value_token;
-        i = next_token(value_token);
-    }
-    return -1;
-}
-static int array_item(int array, int wanted) {
-    if (array < 0 || array >= token_count)
-        return -1;
-    int i = array + 1;
-    int count = 0;
-    while (i < token_count &&
-           tokens[i].start < tokens[array].end) {
-        if (count == wanted)
-            return i;
-        count++;
-        i = next_token(i);
-    }
-    return -1;
-}
-static void get_string_field(
-    int object,
-    const char *key,
-    char *output,
-    size_t size,
-    const char *fallback
-) {
-    int id = object_get(object, key);
-    if (id < 0) {
-        snprintf(output, size, "%s",
-                 fallback ? fallback : "");
-        return;
-    }
-    get_token_text(id, output, size);
-}
-static int get_integer_field(
-    int object,
-    const char *key,
-    int fallback
-) {
-    int id = object_get(object, key);
-    if (id < 0)
-        return fallback;
-    char value[64];
-    get_token_text(id, value, sizeof(value));
-    return atoi(value);
-}
-static int is_active(const Booking *b) {
-    return strcmp(b->status, "ALLOCATED") == 0 ||
-           strcmp(b->status, "APPROVED") == 0 ||
-           strcmp(b->status, "CONFIRMED") == 0;
-}
-static int overlaps(
-    const char *start1,
-    const char *end1,
-    const char *start2,
-    const char *end2
-) {
-    return strcmp(start1, end2) < 0 &&
-           strcmp(start2, end1) < 0;
-}
-static int same_room(const Booking *a, const Booking *b) {
-    return strcmp(a->room, b->room) == 0;
-}
-static int same_day(const Booking *a, const Booking *b) {
-    return strcasecmp(a->day, b->day) == 0;
-}
-static int has_conflict(const Booking *a, const Booking *b) {
-    return same_room(a, b) &&
-           same_day(a, b) &&
-           overlaps(a->start, a->end, b->start, b->end);
-}
-static int find_room(const char *id_or_name) {
-    for (int i = 0; i < room_count; i++) {
-        if (strcmp(rooms[i].id, id_or_name) == 0 ||
-            strcasecmp(rooms[i].name, id_or_name) == 0) {
-            return i;
+
+        if (room->id[0] != '\0') {
+            room_count++;
         }
+
+        child = token_next(child);
     }
-    return -1;
+
+    return room_count;
 }
-static int room_is_busy(
-    const Booking *candidate,
-    int skip_index
-) {
-    for (int i = 0; i < booking_count; i++) {
-        if (i == skip_index)
-            continue;
-        if (!is_active(&bookings[i]))
-            continue;
-        if (has_conflict(candidate, &bookings[i]))
-            return 1;
-    }
-    return 0;
-}
-static void load_data(int root) {
-    room_count = 0;
+
+
+/* Load existing bookings from JSON */
+
+static int load_bookings(int array_token) {
     booking_count = 0;
-    int room_array = object_get(root, "rooms");
-    for (int i = 0; i < MAX_ROOMS; i++) {
-        int item = array_item(room_array, i);
-        if (item < 0)
-            break;
-        Room *r = &rooms[room_count++];
-        get_string_field(item, "id",
-                         r->id, sizeof(r->id), "");
-        get_string_field(item, "name",
-                         r->name, sizeof(r->name), r->id);
-        r->capacity =
-            get_integer_field(item, "capacity", 0);
+
+    if (array_token < 0 ||
+        tokens[array_token].type != TOKEN_ARRAY) {
+        return 0;
     }
-    int booking_array = object_get(root, "bookings");
-    for (int i = 0; i < MAX_BOOKINGS; i++) {
-        int item = array_item(booking_array, i);
-        if (item < 0)
-            break;
-        Booking *b = &bookings[booking_count++];
-        memset(b, 0, sizeof(*b));
-        get_string_field(item, "id",
-                         b->id, sizeof(b->id), "");
-        get_string_field(item, "faculty",
-                         b->faculty, sizeof(b->faculty), "");
-        if (object_get(item, "faculty_name") >= 0) {
-            get_string_field(item, "faculty_name",
-                             b->faculty, sizeof(b->faculty), "");
+
+    int end = token_next(array_token);
+    int child = array_token + 1;
+
+    while (child < end && booking_count < MAX_BOOKINGS) {
+        if (tokens[child].type != TOKEN_OBJECT) {
+            child = token_next(child);
+            continue;
         }
-        get_string_field(item, "room",
-                         b->room, sizeof(b->room), "");
-        get_string_field(item, "day",
-                         b->day, sizeof(b->day), "");
-        get_string_field(item, "start",
-                         b->start, sizeof(b->start), "");
-        get_string_field(item, "end",
-                         b->end, sizeof(b->end), "");
-        get_string_field(item, "course",
-                         b->course, sizeof(b->course), "");
-        get_string_field(item, "type",
-                         b->type, sizeof(b->type), "temporary");
-        get_string_field(item, "status",
-                         b->status, sizeof(b->status), "PENDING");
-        b->students = get_integer_field(item, "students", 0);
-        b->priority = get_integer_field(item, "priority", 1);
-        b->processing_time =
-            get_integer_field(item, "processing_time", 1);
+
+        Booking *booking = &bookings[booking_count];
+
+        memset(booking, 0, sizeof(*booking));
+
+        token_string(find_key(child, "id"),
+                     booking->id, sizeof(booking->id));
+
+        int faculty_token = find_key(child, "faculty");
+
+        if (faculty_token < 0) {
+            faculty_token = find_key(child, "faculty_name");
+        }
+
+        token_string(faculty_token,
+                     booking->faculty, sizeof(booking->faculty));
+
+        token_string(find_key(child, "room"),
+                     booking->room, sizeof(booking->room));
+
+        token_string(find_key(child, "day"),
+                     booking->day, sizeof(booking->day));
+
+        token_string(find_key(child, "start"),
+                     booking->start, sizeof(booking->start));
+
+        token_string(find_key(child, "end"),
+                     booking->end, sizeof(booking->end));
+
+        token_string(find_key(child, "status"),
+                     booking->status, sizeof(booking->status));
+
+        booking->students =
+            token_integer(find_key(child, "students"), 1);
+
+        booking->priority =
+            token_integer(find_key(child, "priority"), 5);
+
+        booking->processing_time =
+            token_integer(find_key(child, "processing_time"), 1);
+
+        if (booking->id[0] != '\0') {
+            booking_count++;
+        }
+
+        child = token_next(child);
     }
+
+    return booking_count;
+}
+
+
+/* Load pending booking requests in the supplied order */
+
+static int load_pending(int array_token,
+                        Booking *pending,
+                        int max_pending) {
+    int count = 0;
+
+    if (array_token < 0 ||
+        tokens[array_token].type != TOKEN_ARRAY) {
+        return 0;
+    }
+
+    int end = token_next(array_token);
+    int child = array_token + 1;
+
+    while (child < end && count < max_pending) {
+        if (tokens[child].type != TOKEN_OBJECT) {
+            child = token_next(child);
+            continue;
+        }
+
+        Booking *booking = &pending[count];
+
+        memset(booking, 0, sizeof(*booking));
+
+        token_string(find_key(child, "id"),
+                     booking->id, sizeof(booking->id));
+
+        int faculty_token = find_key(child, "faculty");
+
+        if (faculty_token < 0) {
+            faculty_token = find_key(child, "faculty_name");
+        }
+
+        token_string(faculty_token,
+                     booking->faculty, sizeof(booking->faculty));
+
+        token_string(find_key(child, "room"),
+                     booking->room, sizeof(booking->room));
+
+        token_string(find_key(child, "day"),
+                     booking->day, sizeof(booking->day));
+
+        token_string(find_key(child, "start"),
+                     booking->start, sizeof(booking->start));
+
+        token_string(find_key(child, "end"),
+                     booking->end, sizeof(booking->end));
+
+        booking->students =
+            token_integer(find_key(child, "students"), 1);
+
+        booking->priority =
+            token_integer(find_key(child, "priority"), 5);
+
+        booking->processing_time =
+            token_integer(find_key(child, "processing_time"), 1);
+
+        if (booking->processing_time <= 0) {
+            int start = time_to_minutes(booking->start);
+            int finish = time_to_minutes(booking->end);
+
+            booking->processing_time =
+                (start >= 0 && finish > start)
+                    ? finish - start
+                    : 1;
+        }
+
+        if (booking->id[0] != '\0') {
+            count++;
+        }
+
+        child = token_next(child);
+    }
+
+    return count;
+}
+
+
+/* Check classroom availability */
+
+static int is_room_available(const char *room_id,
+                             const char *day,
+                             const char *start,
+                             const char *end,
+                             int students,
+                             char *reason,
+                             size_t reason_size) {
+    int room_index = find_room(room_id);
+
+    if (room_index < 0) {
+        snprintf(reason, reason_size, "ROOM_NOT_FOUND");
+        return 0;
+    }
+
+    Room *room = &rooms[room_index];
+
+    if (!room->active) {
+        snprintf(reason, reason_size, "ROOM_UNAVAILABLE");
+        return 0;
+    }
+
+    if (students <= 0) {
+        snprintf(reason, reason_size, "INVALID_CAPACITY");
+        return 0;
+    }
+
+    if (students > room->capacity) {
+        snprintf(reason, reason_size, "CAPACITY_EXCEEDED");
+        return 0;
+    }
+
+    int start_minutes = time_to_minutes(start);
+    int end_minutes = time_to_minutes(end);
+
+    if (start_minutes < 0 ||
+        end_minutes < 0 ||
+        end_minutes <= start_minutes) {
+        snprintf(reason, reason_size, "INVALID_TIME");
+        return 0;
+    }
+
     for (int i = 0; i < booking_count; i++) {
-        int r = find_room(bookings[i].room);
+        Booking *booking = &bookings[i];
 
-        if (r >= 0) {
-            snprintf(bookings[i].room,
-                     sizeof(bookings[i].room),
-                     "%s", rooms[r].id);
+        if (!is_active_status(booking->status)) {
+            continue;
+        }
+
+        if (strcmp(booking->room, room_id) != 0) {
+            continue;
+        }
+
+        if (strcmp(booking->day, day) != 0) {
+            continue;
+        }
+
+        if (intervals_overlap(start, end,
+                              booking->start, booking->end)) {
+            snprintf(reason, reason_size, "TIME_CONFLICT");
+            return 0;
         }
     }
+
+    snprintf(reason, reason_size, "AVAILABLE");
+
+    return 1;
 }
-static void print_json_string(const char *text) {
+
+
+/* Print a JSON-escaped string */
+
+static void print_json_string(const char *value) {
     putchar('"');
 
-    for (const unsigned char *p =
-             (const unsigned char *)text; *p; p++) {
+    for (const unsigned char *p = (const unsigned char *)value;
+         *p; p++) {
+        switch (*p) {
+            case '"':
+                printf("\\\"");
+                break;
 
-        if (*p == '"' || *p == '\\')
-            putchar('\\');
+            case '\\':
+                printf("\\\\");
+                break;
 
-        if (*p == '\n' || *p == '\r')
-            putchar(' ');
-        else
-            putchar(*p);
+            case '\n':
+                printf("\\n");
+                break;
+
+            case '\r':
+                printf("\\r");
+                break;
+
+            case '\t':
+                printf("\\t");
+                break;
+
+            default:
+                if (*p < 32) {
+                    printf("\\u%04x", *p);
+                } else {
+                    putchar(*p);
+                }
+        }
     }
 
     putchar('"');
 }
 
-static void print_alternatives(
-    const Booking *candidate,
-    int include_requested_room
-) {
+
+/* Check one classroom request */
+
+static void operation_check_room(int root) {
+    char room_id[MAX_TEXT] = "";
+    char day[MAX_TEXT] = "";
+    char start[MAX_TEXT] = "";
+    char end[MAX_TEXT] = "";
+    char reason[MAX_TEXT] = "";
+
+    token_string(find_key(root, "room"),
+                 room_id, sizeof(room_id));
+
+    token_string(find_key(root, "day"),
+                 day, sizeof(day));
+
+    token_string(find_key(root, "start"),
+                 start, sizeof(start));
+
+    token_string(find_key(root, "end"),
+                 end, sizeof(end));
+
+    int students = token_integer(
+        find_key(root, "students"), 1
+    );
+
+    if (students <= 0) {
+        students = token_integer(
+            find_key(root, "required_capacity"), 1
+        );
+    }
+
+    int available = is_room_available(
+        room_id,
+        day,
+        start,
+        end,
+        students,
+        reason,
+        sizeof(reason)
+    );
+
+    int room_index = find_room(room_id);
+    int room_found = room_index >= 0;
+
+    int capacity_ok = room_found &&
+                      students > 0 &&
+                      students <= rooms[room_index].capacity;
+
+    printf("{\"success\":true,\"available\":%s,"
+           "\"capacity_ok\":%s,\"room_found\":%s,"
+           "\"conflicts\":[],\"alternatives\":[",
+           available ? "true" : "false",
+           capacity_ok ? "true" : "false",
+           room_found ? "true" : "false");
+
     int first = 1;
 
-    printf("\"alternatives\":[");
+    if (!available && students > 0) {
+        for (int i = 0; i < room_count; i++) {
+            char alternative_reason[MAX_TEXT];
 
-    for (int r = 0; r < room_count; r++) {
-        if (!include_requested_room &&
-            strcmp(rooms[r].id, candidate->room) == 0) {
+            if (!rooms[i].active ||
+                rooms[i].capacity < students) {
+                continue;
+            }
+
+            if (is_room_available(
+                    rooms[i].id,
+                    day,
+                    start,
+                    end,
+                    students,
+                    alternative_reason,
+                    sizeof(alternative_reason))) {
+
+                if (!first) {
+                    putchar(',');
+                }
+
+                printf("{\"id\":");
+                print_json_string(rooms[i].id);
+
+                printf(",\"name\":");
+                print_json_string(rooms[i].name);
+
+                putchar('}');
+
+                first = 0;
+            }
+        }
+    }
+
+    printf("],\"message\":");
+    print_json_string(reason);
+    printf("}\n");
+}
+
+
+/* Calculate booking duration */
+
+static int booking_duration(const Booking *booking) {
+    int start = time_to_minutes(booking->start);
+    int end = time_to_minutes(booking->end);
+
+    if (start < 0 || end <= start) {
+        return booking->processing_time > 0
+            ? booking->processing_time
+            : 1;
+    }
+
+    return end - start;
+}
+
+
+/* Suggest alternative classrooms */
+
+static void print_alternatives(const Booking *booking) {
+    printf("[");
+
+    int first = 1;
+
+    for (int i = 0; i < room_count; i++) {
+        char reason[MAX_TEXT];
+
+        if (!rooms[i].active ||
+            rooms[i].capacity < booking->students) {
             continue;
         }
 
-        if (rooms[r].capacity < candidate->students)
-            continue;
+        if (is_room_available(
+                rooms[i].id,
+                booking->day,
+                booking->start,
+                booking->end,
+                booking->students,
+                reason,
+                sizeof(reason))) {
 
-        Booking test = *candidate;
+            if (!first) {
+                putchar(',');
+            }
 
-        snprintf(test.room, sizeof(test.room),
-                 "%s", rooms[r].id);
+            printf("{\"id\":");
+            print_json_string(rooms[i].id);
 
-        if (room_is_busy(&test, -1))
-            continue;
+            printf(",\"name\":");
+            print_json_string(rooms[i].name);
 
-        if (!first)
-            putchar(',');
+            putchar('}');
 
-        first = 0;
-
-        printf("{\"id\":");
-        print_json_string(rooms[r].id);
-
-        printf(",\"name\":");
-        print_json_string(rooms[r].name);
-
-        printf(",\"capacity\":%d}", rooms[r].capacity);
+            first = 0;
+        }
     }
 
     printf("]");
 }
-static void operation_check_room(int root) {
-    char room[MAX_TEXT];
-    char day[MAX_TEXT];
-    char start[MAX_TEXT];
-    char end[MAX_TEXT];
 
-    int students = get_integer_field(
-        root, "students",
-        get_integer_field(root, "required_capacity", 0)
+
+/* Print each scheduling result.
+   The day field is required by the Python application. */
+
+static void print_booking_result(const Booking *booking,
+                                 const char *result_status,
+                                 const char *reason) {
+    printf("{\"id\":");
+    print_json_string(booking->id);
+
+    printf(",\"day\":");
+    print_json_string(booking->day);
+
+    printf(",\"status\":");
+    print_json_string(result_status);
+
+    printf(",\"reason\":");
+    print_json_string(reason);
+
+    printf(",\"waiting_time\":%d", booking->waiting_time);
+
+    printf(",\"turnaround_time\":%d",
+           booking->turnaround_time);
+
+    printf(",\"alternatives\":");
+    print_alternatives(booking);
+
+    printf("}");
+}
+
+
+/* FCFS scheduler */
+
+static void operation_schedule(int root) {
+    const char *algorithm = "FCFS";
+
+    int pending_token = find_key(root, "pending");
+
+    if (pending_token < 0) {
+        pending_token = find_key(root, "requests");
+    }
+
+    /*
+     * Static storage avoids placing a very large Booking array
+     * on the stack.
+     */
+    static Booking pending[MAX_BOOKINGS];
+    static Job jobs[MAX_BOOKINGS];
+
+    int pending_count = load_pending(
+        pending_token,
+        pending,
+        MAX_BOOKINGS
     );
 
-    get_string_field(root, "room",
-                     room, sizeof(room), "");
-
-    get_string_field(root, "day",
-                     day, sizeof(day), "");
-
-    get_string_field(root, "start",
-                     start, sizeof(start), "");
-
-    get_string_field(root, "end",
-                     end, sizeof(end), "");
-    int room_id = find_room(room);
-    Booking query = {0};
-    snprintf(query.room, sizeof(query.room), "%s",
-             room_id >= 0 ? rooms[room_id].id : room);
-    snprintf(query.day, sizeof(query.day), "%s", day);
-    snprintf(query.start, sizeof(query.start), "%s", start);
-    snprintf(query.end, sizeof(query.end), "%s", end);
-    query.students = students;
-     int valid = room_id >= 0 &&
-                *day && *start && *end &&
-                strcmp(start, end) < 0;
-     int capacity_ok = room_id >= 0 &&
-                      students > 0 &&
-                      rooms[room_id].capacity >= students;
-    pthread_mutex_lock(&allocation_lock);
-    int available = valid &&
-                    capacity_ok &&
-                    !room_is_busy(&query, -1);
-      printf("{\"success\":true,"
-           "\"operation\":\"check_room\","
-           "\"available\":%s,"
-           "\"capacity_ok\":%s,"
-           "\"room_found\":%s,"
-           "\"conflicts\":[",
-           available ? "true" : "false",
-           capacity_ok ? "true" : "false",
-           room_id >= 0 ? "true" : "false");
-int first = 1;for (int i = 0; i < booking_count; i++) {
-        if (is_active(&bookings[i]) &&
-            has_conflict(&query, &bookings[i])) {
-
-            if (!first)
-                putchar(',');
-
-            first = 0;
-
-            printf("{\"booking_id\":");
-            print_json_string(bookings[i].id);
-
-            printf(",\"faculty\":");
-            print_json_string(bookings[i].faculty);
-
-            printf(",\"start\":");
-            print_json_string(bookings[i].start);
-
-            printf(",\"end\":");
-            print_json_string(bookings[i].end);
-
-            putchar('}');
-        }
-    }
-    printf("],");
-    print_alternatives(&query, 0);
-    printf(",\"message\":");
-    if (!valid) {
-        print_json_string("Invalid room or time details.");
-    } else if (!capacity_ok) {
-        print_json_string("Room capacity is insufficient.");
-    } else if (available) {
-        print_json_string("Room is available.");
-    } else {
-        print_json_string("Room has a scheduling conflict.");
-    }
-    printf("}\n");
-    pthread_mutex_unlock(&allocation_lock);
-}
-static int comes_before(
-    const Booking *a,
-    const Booking *b,
-    const char *algorithm
-) {
-    if (strcmp(algorithm, "PRIORITY") == 0 &&
-        a->priority != b->priority) {
-        return a->priority > b->priority;
-    }
-    return atoi(a->id) < atoi(b->id);
-}
-static void operation_schedule(int root) {
-    char algorithm[64];
-
-    get_string_field(root, "algorithm",
-                     algorithm, sizeof(algorithm), "FCFS");
-
-    for (char *p = algorithm; *p; p++) {
-        *p = (char)toupper((unsigned char)*p);
-    }
-
-    if (strcmp(algorithm, "FCFS") != 0 &&
-        strcmp(algorithm, "PRIORITY") != 0) {
-
-        printf("{\"success\":false,"
-               "\"message\":\"Choose FCFS or PRIORITY.\"}\n");
-        return;
-    }
-    int pending_array = object_get(root, "pending");
-    Booking pending[MAX_BOOKINGS];
-    int count = 0;
-    for (int i = 0; i < MAX_BOOKINGS; i++) {
-        int item = array_item(pending_array, i);
-        if (item < 0)
-            break;
-        Booking *b = &pending[count++];
-        memset(b, 0, sizeof(*b));
-        get_string_field(item, "id",
-                         b->id, sizeof(b->id), "");
-
-        get_string_field(item, "faculty",
-                         b->faculty, sizeof(b->faculty), "");
-
-        get_string_field(item, "room",
-                         b->room, sizeof(b->room), "");
-
-        get_string_field(item, "day",
-                         b->day, sizeof(b->day), "");
-
-        get_string_field(item, "start",
-                         b->start, sizeof(b->start), "");
-
-        get_string_field(item, "end",
-                         b->end, sizeof(b->end), "");
-
-        get_string_field(item, "course",
-                         b->course, sizeof(b->course), "");
-
-        get_string_field(item, "type",
-                         b->type, sizeof(b->type), "temporary");
-
-        get_string_field(item, "status",
-                         b->status, sizeof(b->status), "PENDING");
-
-        b->students = get_integer_field(item, "students", 0);
-        b->priority = get_integer_field(item, "priority", 1);
-
-        b->processing_time =
-            get_integer_field(item, "processing_time", 1);
-
-        int r = find_room(b->room);
-
-        if (r >= 0) {
-            snprintf(b->room, sizeof(b->room),
-                     "%s", rooms[r].id);
-        }
-    }
-    for (int i = 0; i < count; i++) {
-        for (int j = i + 1; j < count; j++) {
-            if (comes_before(&pending[j], &pending[i], algorithm)) {
-                Booking temp = pending[i];
-                pending[i] = pending[j];
-                pending[j] = temp;
-            }
-        }
+    /*
+     * FCFS means First Come, First Served.
+     *
+     * The Python application must send requests in ascending
+     * request_id order. This C module preserves that order.
+     */
+    for (int i = 0; i < pending_count; i++) {
+        jobs[i].index = i;
+        jobs[i].priority = pending[i].priority;
+        jobs[i].duration = booking_duration(&pending[i]);
+        jobs[i].original_order = i;
     }
 
     printf("{\"success\":true,\"algorithm\":");
     print_json_string(algorithm);
+
     printf(",\"results\":[");
 
-    int elapsed = 0;
+    int first_result = 1;
+    int current_wait = 0;
+    for (int i = 0; i < pending_count; i++) {
+        Booking *booking = &pending[jobs[i].index];
+        char reason[MAX_TEXT] = "";
+        int available = is_room_available(
+            booking->room,
+            booking->day,
+            booking->start,
+            booking->end,
+            booking->students,
+            reason,
+            sizeof(reason)
+        );
 
-    pthread_mutex_lock(&allocation_lock);
+        if (available) {
+            strcpy(booking->status, "ALLOCATED");
 
-    for (int i = 0; i < count; i++) {
-        Booking *b = &pending[i];
+            booking->waiting_time = current_wait;
 
-        char reason[256] = "";
-        int room_id = find_room(b->room);
-        int accepted = 1;
-
-        if (!*b->id || !*b->faculty ||
-            !*b->day || !*b->start || !*b->end ||
-            strcmp(b->start, b->end) >= 0) {
-
-            accepted = 0;
-            snprintf(reason, sizeof(reason),
-                     "Invalid or incomplete booking details.");
-
-        } else if (b->students <= 0) {
-
-            accepted = 0;
-            snprintf(reason, sizeof(reason),
-                     "Student count must be greater than zero.");
-
-        } else if (room_id < 0) {
-
-            accepted = 0;
-            snprintf(reason, sizeof(reason),
-                     "Requested room does not exist.");
-
-        } else if (rooms[room_id].capacity < b->students) {
-
-            accepted = 0;
-            snprintf(reason, sizeof(reason),
-                     "Room capacity is insufficient.");
-
-        } else if (room_is_busy(b, -1)) {
-
-            accepted = 0;
-            snprintf(reason, sizeof(reason),
-                     "Room has an overlapping booking.");
-        }
-
-        if (accepted) {
-            snprintf(b->status, sizeof(b->status), "ALLOCATED");
+            booking->turnaround_time =
+                current_wait + booking_duration(booking);
 
             if (booking_count < MAX_BOOKINGS) {
-                bookings[booking_count++] = *b;
-            } else {
-                accepted = 0;
-                snprintf(b->status, sizeof(b->status), "REJECTED");
-                snprintf(reason, sizeof(reason),
-                         "Booking storage limit reached.");
+                bookings[booking_count++] = *booking;
             }
         } else {
-            snprintf(b->status, sizeof(b->status), "REJECTED");
+            strcpy(booking->status, "REJECTED");
+
+            booking->waiting_time = 0;
+            booking->turnaround_time = 0;
         }
-
-        if (i)
+        if (!first_result) {
             putchar(',');
+        }
+        print_booking_result(
+            booking,
+            booking->status,
+            reason
+        );
+        first_result = 0;
 
-        printf("{\"id\":");
-        print_json_string(b->id);
-        printf(",\"status\":");
-        print_json_string(b->status);
-
-        printf(",\"reason\":");
-        print_json_string(reason);
-
-        int processing = b->processing_time > 0
-                         ? b->processing_time : 1;
-
-        printf(",\"waiting_time\":%d", elapsed);
-        printf(",\"turnaround_time\":%d", elapsed + processing);
-
-        elapsed += processing;
-
-        printf(",");
-        print_alternatives(b, 0);
-        putchar('}');
+        if (available) {
+            current_wait += booking_duration(booking);
+        }
     }
-    pthread_mutex_unlock(&allocation_lock);
     printf("]}\n");
 }
-static void *process_request(void *argument) {
-    (void)argument;
-
-    token_count = 0;
-    int position = 0;
-    int root = parse_value(&position, -1);
-     if (root < 0 ||
-        input_buffer[tokens[root].start] != '{') {
-
-        printf("{\"success\":false,"
-               "\"message\":\"Invalid JSON request.\"}\n");
-        return NULL;
+int main(void) {
+    if (fgets(json, sizeof(json), stdin) == NULL) {
+        printf("{\"success\":false,\"message\":\"NO_INPUT\"}\n");
+        return 1;
     }
-    load_data(root);
-    char operation[64];
-     get_string_field(root, "operation",
-                     operation, sizeof(operation), "");
+    if (strlen(json) >= sizeof(json) - 1 &&
+        json[sizeof(json) - 2] != '\n') {
+        printf("{\"success\":false,\"message\":\"INPUT_TOO_LARGE\"}\n");
+        return 1;
+    }
+    int root = parse_json();
+    if (root < 0) {
+        printf("{\"success\":false,\"message\":\"INVALID_JSON\"}\n");
+        return 1;
+    }
+    int operation_token = find_key(root, "operation");
+
+    if (operation_token < 0) {
+        printf("{\"success\":false,\"message\":\"MISSING_OPERATION\"}\n");
+        return 1;
+    }
+    char operation[MAX_TEXT];
+
+    token_string(
+        operation_token,
+        operation,
+        sizeof(operation)
+    );
+
+    pthread_mutex_lock(&mutex);
+
+    load_rooms(find_key(root, "rooms"));
+    load_bookings(find_key(root, "bookings"));
 
     if (strcmp(operation, "check_room") == 0) {
         operation_check_room(root);
     } else if (strcmp(operation, "schedule") == 0) {
         operation_schedule(root);
     } else {
-        printf("{\"success\":false,"
-               "\"message\":\"Unknown operation. "
-               "Use check_room or schedule.\"}\n");
+        printf("{\"success\":false,\"message\":\"UNKNOWN_OPERATION\"}\n");
     }
 
-    return NULL;
-}
-int main(void) {
-    if (!fgets(input_buffer, sizeof(input_buffer), stdin)) {
-        puts("{\"success\":false,\"message\":\"No input received.\"}");
-        return 1;
-    }
-
-    pthread_t thread;
-
-    if (pthread_create(&thread, NULL,
-                       process_request, NULL) != 0) {
-        puts("{\"success\":false,"
-             "\"message\":\"Unable to create POSIX thread.\"}");
-        return 1;
-    }
-
-    pthread_join(thread, NULL);
+    pthread_mutex_unlock(&mutex);
 
     return 0;
 }
