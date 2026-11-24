@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CampusResOS | Campus Resource Scheduling</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand-lockup" href="#" aria-label="CampusResOS home">
+    <span class="brand-mark">C</span>
+    <span><strong>CampusResOS</strong>
+      <!-- <small>Campus Resource &amp; Room Scheduling</small> -->
+    </span>
+  </a>
+  <div class="topbar-right"><span class="status-dot"></span><span id="sessionArea">Demo environment</span></div>
+</header>
+
+<main class="shell">
+  <section id="loginPanel" class="login-layout panel">
+    <!-- <div class="login-art">
+      <div class="eyebrow">CAMPUS RESOURCE MANAGEMENT</div>
+      <h1>Every room.<br>Every schedule.<br><em>In sync.</em></h1>
+      <p>One clear workspace for classroom reservations and timetable coordination.</p>
+      <div class="login-decoration"><span>01</span><span>Plan</span><i></i><span>02</span><span>Reserve</span><i></i><span>03</span><span>Coordinate</span></div>
+    </div> -->
+    <div class="login-form-wrap">
+      <div class="eyebrow">CampusResOS</div><h2>Sign in to your workspace</h2>
+      <p class="muted">Use your university account to continue.</p>
+      <form id="loginForm">
+        <label>Email address<input id="email" type="email" autocomplete="username" required placeholder="you@geu.ac.in" value=""></label>
+        <label>Password<input id="password" type="password" autocomplete="current-password" required placeholder="Enter your password" value=""></label>
+        <button type="submit" class="full-button">Sign in <span>→</span></button>
+      </form>
+      <div id="loginMessage" class="message" role="status"></div>
+    </div>
+  </section>
+
+  <section id="appPanel" hidden>
+    <div class="app-heading">
+      <div><div class="eyebrow" id="roleEyebrow">WORKSPACE</div><h1 id="welcomeTitle">Dashboard</h1><p id="welcomeSubtitle" class="muted">Manage rooms and bookings.</p></div>
+      <div class="heading-actions"><span class="live-badge"><i></i> System workspace</span><button id="logoutBtn" class="secondary">Log out ↗</button></div>
+    </div>
+
+    <div class="workspace">
+      <aside class="sidebar">
+        <div class="sidebar-label">WORKSPACE</div>
+        <nav id="facultyNav" class="side-nav" hidden>
+          <button class="nav-link active" data-view="facultyHome"><span>⌂</span> Overview</button>
+          <button class="nav-link" data-view="createBookingView"><span>＋</span> Create booking</button>
+          <button class="nav-link" data-view="raiseTicketView"><span>✉</span> Raise a ticket</button>
+          <button class="nav-link" data-view="facultyScheduleView"><span>▦</span> View schedule</button>
+          <button class="nav-link" data-view="myBookingsView"><span>▤</span> My bookings</button>
+        </nav>
+        <nav id="adminNav" class="side-nav" hidden>
+          <button class="nav-link active" data-view="adminHome"><span>⌂</span> Overview</button>
+          <button class="nav-link" data-view="adminTicketsView"><span>✉</span> Timetable tickets <b id="pendingTicketBadge" class="nav-count">0</b></button>
+          <button class="nav-link" data-view="adminScheduleView"><span>▦</span> Room schedule</button>
+          <button class="nav-link" data-view="adminAnalysisView"><span>◫</span> Analysis &amp; utilization</button>
+          <button class="nav-link" data-view="adminBookingsView"><span>▤</span> All bookings</button>
+        </nav>
+        <div class="sidebar-bottom"><div class="sidebar-label">SYSTEM STATUS</div><div class="status-line">
+          <span>Database</span><strong id="dbStatus">Checking</strong></div><div class="status-line">
+          <span>C/POSIX worker</span><strong id="workerStatus">Checking</strong></div><div class="status-line">
+          <span>Classrooms</span><strong id="roomCount">—</strong></div></div>
+      </aside>
+
+      <div class="main-content">
+        <div id="globalMessage" class="message" role="status"></div>
+
+        <!-- FACULTY OVERVIEW -->
+        <section id="facultyHome" class="view-section">
+          <div class="section-intro"><div><div class="eyebrow">YOUR CAMPUS, AT A GLANCE</div><h2>Faculty overview</h2><p class="muted">Your bookings and regular timetable, together in one place.</p></div><button id="facultyRefreshBtn" class="secondary">↻ Refresh</button></div>
+          <div class="stat-grid">
+            <article class="stat-card"><span class="stat-icon">▣</span><small>Classrooms in catalogue</small><strong id="facultyRoomMetric">—</strong><p>Rooms available to browse</p></article>
+            <article class="stat-card"><span class="stat-icon">▤</span><small>My bookings</small><strong id="facultyBookingMetric">—</strong><p>Confirmed room reservations</p></article>
+            <article class="stat-card"><span class="stat-icon">✉</span><small>Open tickets</small><strong id="facultyTicketMetric">—</strong><p>Regular timetable changes</p></article>
+          </div>
+          <div class="quick-grid">
+            <button class="quick-card" data-view="createBookingView"><span>＋</span><strong>Create a booking</strong><small>Find a room for a one-day or recurring class.</small><b>Start booking →</b></button>
+            <button class="quick-card" data-view="raiseTicketView"><span>✉</span><strong>Raise a timetable ticket</strong><small>Request a change to your regular weekly schedule.</small><b>Create ticket →</b></button>
+            <button class="quick-card" data-view="facultyScheduleView"><span>▦</span><strong>View my schedule</strong><small>Check your regular classes and bookings.</small><b>Open schedule →</b></button>
+          </div>
+          <div class="panel"><div class="section-heading"><div><h3>Recent bookings</h3><p class="muted">Your latest confirmed reservations.</p></div><button class="text-button" data-view="myBookingsView">View all →</button></div><div class="table-wrap"><table><thead><tr><th>Booking</th><th>Date</th><th>Room</th><th>Time</th><th>Purpose</th><th>Status</th></tr></thead><tbody id="facultyRecentBookingRows"></tbody></table></div></div>
+        </section>
+
+        <!-- FACULTY CREATE BOOKING -->
+        <section id="createBookingView" class="view-section" hidden>
+          <div class="section-intro"><div><div class="eyebrow">ROOM RESERVATIONS</div><h2>Create booking</h2><p class="muted">Choose a one-day or recurring booking, then select a room that is available for your requested dates and time.</p></div></div>
+          <div id="facultyBookingPanel" class="panel">
+            <form id="bookingSearchForm">
+              <div class="form-grid">
+                <label>Booking type<select id="bookingType" required><option value="">Choose booking type</option><option value="TEMPORARY">One-day booking</option><option value="PERMANENT">Recurring weekly booking</option></select></label>
+                <div id="oneDayFields" hidden><label>Booking date<input id="bookingDate" type="date"></label></div>
+              </div>
+              <div id="recurringFields" hidden>
+                <label>Number of weeks
+                    <input id="bookingWeeks" type="number" min="1" max="52" value="4">
+                </label>
+                <label>First occurrence date<input id="recurringStartDate" type="date"></label>
+                <p class="form-note">The first occurrence determines the weekday. Subsequent bookings will occur weekly.</p>
+              </div>
+              <label>Time slot<select id="timeSlot" required><option value="">Select a time slot</option></select></label>
+              <div class="filter-grid">
+                <label>Room type<select id="filterRoomType"><option value="ALL">All room types</option><option value="CR">Classroom</option><option value="LAB">Laboratory</option><option value="SEMINAR_HALL">Seminar hall</option><option value="LT">Lecture hall</option></select></label>
+                <label>Minimum capacity<input id="filterMinCapacity" type="number" min="1" placeholder="e.g. 40"></label>
+                <label>Sort rooms<select id="sortRooms"><option value="recommended">Recommended</option><option value="capacity-asc">Capacity: low to high</option><option value="capacity-desc">Capacity: high to low</option><option value="name-asc">Room name: A to Z</option></select></label>
+              </div>
+              <button type="submit" id="findRoomsBtn">Find available classrooms →</button>
+            </form>
+            <div id="bookingMessage" class="message" role="status"></div>
+            <p id="roomResultCount" class="muted"></p>
+            <section id="availableRoomsSection" hidden><h3>Available classrooms</h3><p class="muted">Select a room to continue.</p><div id="availableRooms" class="room-list"></div></section>
+            <section id="bookingConfirmSection" class="confirm-card" hidden><h3>Confirm your booking</h3><p id="selectedRoomSummary" class="muted"></p><label>Booking purpose
+  <select id="bookingPurpose" required>
+    <option value="">Select a purpose</option>
+    <option value="Placement meeting">Placement meeting</option>
+    <option value="Pre-placement talks">Pre-placement talks</option>
+    <option value="Syllabus completion">Syllabus completion</option>
+    <option value="Additional lecture">Additional lecture</option>
+    <option value="Workshop / Seminar">Workshop / Seminar</option>
+    <option value="Faculty meeting">Faculty meeting</option>
+    <option value="Club events">Club events</option>
+    <option value="Others">Others</option>
+  </select>
+</label>
+<label id="otherPurposeField" hidden>
+  Specify purpose
+  <input id="otherPurposeText" maxlength="240" placeholder="Enter your booking purpose">
+</label><div id="bookingDatesSummary" class="date-list"></div><div class="button-row"><button type="button" id="confirmBookingBtn">Confirm booking</button><button type="button" id="cancelBookingBtn" class="secondary">Cancel</button></div></section>
+          </div>
+        </section>
+
+        <!-- FACULTY TICKET -->
+        <section id="raiseTicketView" class="view-section" hidden>
+          <div class="section-intro"><div><div class="eyebrow">TIMETABLE SUPPORT</div><h2>Raise a ticket</h2><p class="muted">Use this only for a change to your regular weekly timetable. Extra-class bookings remain automatic and do not need admin approval.</p></div></div>
+          <div class="panel narrow-panel"><form id="scheduleChangeForm">
+            <label>Regular class to change<select id="scheduleEntrySelect" required><option value="">Loading your schedule…</option></select></label>
+            <div class="form-grid two-col"><label>Requested day<select id="requestedDay" required><option value="">Choose day</option><option value="MONDAY">Monday</option><option value="TUESDAY">Tuesday</option><option value="WEDNESDAY">Wednesday</option><option value="THURSDAY">Thursday</option><option value="FRIDAY">Friday</option><option value="SATURDAY">Saturday</option></select></label><label>Requested time slot<select id="requestedSlot" required><option value="">Choose a slot</option></select></label></div>
+            <label>Requested classroom <span class="muted">(optional)</span><select id="requestedClassroom"><option value="">No classroom change requested</option></select></label>
+            <label>Reason for change<textarea id="scheduleChangeReason" maxlength="500" required rows="4" placeholder="Briefly explain why this regular timetable change is needed."></textarea></label>
+            <button type="submit">Submit timetable ticket →</button>
+          </form><div id="scheduleChangeMessage" class="message" role="status"></div></div>
+          <div class="panel"><div class="section-heading"><div><h3>My tickets</h3><p class="muted">Track pending, approved and rejected requests.</p></div><button id="refreshFacultyTicketsBtn" class="secondary">↻ Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Current schedule</th><th>Requested schedule</th><th>Reason</th><th>Status</th><th>Admin note</th></tr></thead><tbody id="facultyTicketRows"></tbody></table></div></div>
+        </section>
+
+        <!-- FACULTY SCHEDULE -->
+        <section id="facultyScheduleView" class="view-section" hidden>
+          <div class="section-intro"><div><div class="eyebrow">WEEKLY PLANNER</div><h2>My schedule</h2><p class="muted">Your regular classes and classroom bookings.</p></div><button id="refreshScheduleBtn" class="secondary">↻ Refresh schedule</button></div>
+          <div id="facultySchedulePanel" class="panel">
+            <div class="schedule-legend">
+                <span><i class="legend-dot regular"></i> Regular class</span>
+                <span><i class="legend-dot one-day"></i> One-day booking</span>
+                <span><i class="legend-dot recurring"></i> Recurring booking</span>
+            </div>
+            <div id="scheduleMessage" class="message"></div>
+            <div class="table-wrap schedule-wrap"><table id="facultyScheduleTable" class="schedule-table"><thead id="scheduleHead"></thead><tbody id="scheduleBody"></tbody></table></div>
+          </div>
+        </section>
+
+        <!-- FACULTY BOOKINGS -->
+        <section id="myBookingsView" class="view-section" hidden>
+          <div class="section-intro"><div><div class="eyebrow">RESERVATION HISTORY</div><h2>My bookings</h2><p class="muted">A record of your confirmed classroom reservations.</p></div><button id="refreshBtn" class="secondary">↻ Refresh</button></div>
+          <div class="panel"><div class="table-wrap"><table><thead><tr><th>Booking</th><th>Date</th><th>Room</th><th>Time</th><th>Purpose</th><th>Status</th></tr></thead><tbody id="bookingRows"></tbody></table></div></div>
+        </section>
+
+        <!-- ADMIN OVERVIEW -->
+        <section id="adminHome" class="view-section" hidden>
+          <div class="section-intro"><div><div class="eyebrow">CAMPUS OPERATIONS</div><h2>Administration overview</h2><p class="muted">Monitor room reservations, timetable tickets and classroom utilization.</p></div><button id="adminRefreshBtn" class="secondary">↻ Refresh</button></div>
+          <div class="stat-grid">
+            <article class="stat-card"><span class="stat-icon">▣</span><small>Classrooms</small><strong id="adminRoomMetric">—</strong><p>Rooms in the catalogue</p></article>
+            <article class="stat-card"><span class="stat-icon">▤</span><small>Confirmed bookings</small><strong id="adminBookingMetric">—</strong><p>Current booking records</p></article>
+            <article class="stat-card"><span class="stat-icon">✉</span><small>Pending tickets</small><strong id="adminTicketMetric">—</strong><p>Awaiting admin review</p></article>
+          </div>
+          <div class="quick-grid">
+            <button class="quick-card" data-view="adminTicketsView"><span>✉</span><strong>Review timetable tickets</strong><small>Approve or reject regular timetable-change requests.</small><b>Open tickets →</b></button>
+            <button class="quick-card" data-view="adminScheduleView"><span>▦</span><strong>Inspect a room schedule</strong><small>Choose a classroom and inspect its recorded bookings.</small><b>View room schedule →</b></button>
+            <button class="quick-card" data-view="adminAnalysisView"><span>◫</span><strong>Room utilization</strong><small>Explore reservation activity across classrooms.</small><b>View analysis →</b></button>
+          </div>
+          <div class="panel"><div class="section-heading"><div><h3>Pending timetable tickets</h3><p class="muted">Only regular timetable-change tickets appear here.</p></div><button class="text-button" data-view="adminTicketsView">View all →</button></div><div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Faculty</th><th>Current</th><th>Requested</th><th>Reason</th><th>Decision</th></tr></thead><tbody id="adminRecentTicketRows"></tbody></table></div></div>
+        </section>
+
+        <!-- ADMIN TICKETS -->
+        <section id="adminTicketsView" class="view-section" hidden>
+          <div class="section-intro"><div><div class="eyebrow">REVIEW QUEUE</div><h2>Timetable-change tickets</h2><p class="muted">Review requests to change a faculty member’s regular weekly timetable. Regular room bookings are not routed through this queue.</p></div><button id="refreshRequestsBtn" class="secondary">↻ Refresh</button></div>
+          <div class="panel"><div class="section-heading"><div><h3>Pending tickets</h3><p class="muted">Only tickets awaiting a decision are shown.</p></div><span id="pendingTicketLabel" class="live-badge">0 pending</span></div><div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Faculty</th><th>Current schedule</th><th>Requested schedule</th><th>Reason</th><th>Decision</th></tr></thead><tbody id="requestRows"></tbody></table></div></div>
+          <div class="panel"><div class="section-heading"><div><h3>Ticket history</h3><p class="muted">Reviewed tickets are retained for audit purposes.</p></div><button id="refreshHistoryBtn" class="secondary">↻ Refresh history</button></div><div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Faculty</th><th>Current</th><th>Requested</th><th>Reason</th><th>Status</th><th>Admin note</th><th>Reviewed by</th></tr></thead><tbody id="scheduleChangeHistoryRows"></tbody></table></div></div>
+        </section>
+
+      
+
+
+        <!-- ADMIN ROOM SCHEDULE -->
+        <section id="adminScheduleView" class="view-section" hidden>
+
+          <div class="section-intro">
+            <div>
+              <div class="eyebrow">ROOM PLANNER</div>
+              <h2>Classroom schedule</h2>
+              <p class="muted">View a classroom's weekly timetable and utilization.</p>
+            </div>
+          </div>
+
+          <div class="panel">
+
+            <!-- Filters -->
+            <div class="form-grid two-col">
+              <label for="adminRoomSelect">
+                Choose classroom
+                <select id="adminRoomSelect">
+                  <option value="">Select a classroom</option>
+                </select>
+              </label>
+
+              <label>
+                Schedule week
+                <div class="week-navigation">
+                  <button type="button" id="adminPrevWeek" class="btn btn-secondary">
+                    ← Previous Week
+                  </button>
+                  <strong id="adminWeekLabel">Current Week</strong>
+                  <button type="button" id="adminNextWeek" class="btn btn-secondary">
+                    Next Week →
+                  </button>
+                </div>
+              </label>
+            </div>
+
+            <div id="adminRoomScheduleMessage" class="message"></div>
+
+            <!-- Weekly timetable -->
+            <div class="table-wrap">
+              <table class="schedule-table">
+                <thead>
+                  <tr id="adminRoomScheduleHeader">
+                    <th>Day</th>
+                  </tr>
+                </thead>
+                <tbody id="adminRoomScheduleRows">
+                  <tr>
+                    <td colspan="7">Select a classroom to view its timetable.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+          </div>
+
+          <!-- Room utilization only -->
+          <div class="room-utilization">
+            <h3>Room utilization</h3>
+
+            <div
+              class="utilization-track"
+              role="progressbar"
+              aria-label="Room utilization"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <i id="weeklyUtilizationBar" style="width: 0%;"></i>
+            </div>
+
+            <strong id="weeklyUtilization">0%</strong>
+          </div>
+
+        </section>
+
+
+
+
+
+
+        <!-- ADMIN ANALYSIS -->
+        <section id="adminAnalysisView" class="view-section" hidden>
+          <div class="section-intro"><div><div class="eyebrow">RESOURCE INSIGHTS</div><h2>Analysis &amp; room utilization</h2><p class="muted">A quick view of recorded reservation activity by classroom.</p></div><button id="refreshAnalysisBtn" class="secondary">↻ Refresh analysis</button></div>
+          <div class="stat-grid"><article class="stat-card"><small>Total classrooms</small><strong id="analysisRoomCount">—</strong><p>Catalogue size</p></article><article class="stat-card"><small>Confirmed bookings</small><strong id="analysisBookingCount">—</strong><p>Records returned by booking API</p></article><article class="stat-card"><small>Rooms with bookings</small><strong id="analysisUsedRoomCount">—</strong><p>Distinct rooms in returned bookings</p></article></div>
+          <div class="panel"><div class="section-heading"><div><h3>Booking activity by classroom</h3><p class="muted">This is a reservation-count view, not a percentage of available hours.</p></div></div><div id="utilizationRows" class="utilization-list"></div></div>
+        </section>
+
+        <!-- ADMIN ALL BOOKINGS -->
+        <section id="adminBookingsView" class="view-section" hidden>
+          <div class="section-intro"><div><div class="eyebrow">RESERVATION RECORDS</div><h2>All bookings</h2><p class="muted">View confirmed classroom allocations recorded in the system.</p></div><button id="adminBookingsRefreshBtn" class="secondary">↻ Refresh</button></div>
+          <div class="panel"><div class="table-wrap"><table><thead><tr><th>Booking</th><th>Date</th><th>Room</th><th>Time</th><th>Purpose</th><th>Status</th></tr></thead><tbody id="adminBookingRows"></tbody></table></div></div>
+        </section>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>CampusResOS <span>·</span> OS + DBMS integrated project</footer>
+
+<script defer src="/js/core.js"></script>
+<script defer src="/js/auth.js"></script>
+<script defer src="/js/bookings.js"></script>
+<script defer src="/js/faculty/schedule.js"></script>
+<script defer src="/js/faculty/tickets.js"></script>
+<script defer src="/js/admin/dashboard.js"></script>
+<script defer src="/js/navigation.js"></script>
+<script defer src="/js/app.js"></script>
+</body>
+</html>

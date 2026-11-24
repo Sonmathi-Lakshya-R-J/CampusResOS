@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+os_module/campusresos_worker
+*.sock
+.venv-wsl/
+
+# Local backups and development files
+*.bak
+*.pym-a
+.vscode/
+os_module/src/worker
